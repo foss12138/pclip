@@ -26,9 +26,9 @@ init_alpha: 10  # 模型的初始alpha值
 
 # ------ Basic Config ------
 dataset: 'breakhis'  # 自定义数据集名称
-shots: 20  # 使用全量数据集，若要进行少样本学习，可以将其设置为具体的样本数，如shots: 16
+shots: 50  # 使用全量数据集，若要进行少样本学习，可以将其设置为具体的样本数，如shots: 16
 backbone: 'RN50'  # 使用ResNet-50作为骨干网络
 
 lr: 0.001  # 学习率
-augment_epoch: 10  # 数据增强的训练周期数
-train_epoch: 20  # 总的训练周期数
+augment_epoch: 15  # 数据增强的训练周期数
+train_epoch: 30  # 总的训练周期数

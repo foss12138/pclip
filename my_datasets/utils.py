@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import Dataset as TorchDataset
 import torchvision.transforms as T
 from PIL import Image
-
+from transformers import CLIPModel, CLIPProcessor
 
 def read_json(fpath):
     """Read json file from a path."""
@@ -341,8 +341,14 @@ class DatasetWrapper(TorchDataset):
     def _transform_image(self, tfm, img0):
         img_list = []
 
+        # 如果 tfm 是 CLIPProcessor，明确使用 processor 处理图像
         for k in range(self.k_tfm):
-            img_list.append(tfm(img0))
+            if isinstance(tfm, CLIPProcessor):
+                # 使用 CLIPProcessor 来处理图像
+                img_list.append(tfm(images=img0, return_tensors="pt").pixel_values[0])
+            else:
+                # 对于 torchvision.transforms.Compose 或其他变换，直接传入图像
+                img_list.append(tfm(img0))  
 
         img = img_list
         if len(img) == 1:
@@ -351,27 +357,32 @@ class DatasetWrapper(TorchDataset):
         return img
 
 
+
 def build_data_loader(
     data_source=None,
     batch_size=64,
     input_size=224,
-    tfm=None,
+    tfm=None,  # 仍然允许传递 transform 或 processor
     is_train=True,
     shuffle=False,
-    dataset_wrapper=None
+    dataset_wrapper=None,
+    num_workers=0  # 可调的 num_workers 参数，默认为 0，防止并行问题
 ):
+
+    # 设置环境变量，避免 tokenizers 的并行化问题
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     if dataset_wrapper is None:
         dataset_wrapper = DatasetWrapper
 
-    # Build data loader
+    # 构建数据加载器
     data_loader = torch.utils.data.DataLoader(
         dataset_wrapper(data_source, input_size=input_size, transform=tfm, is_train=is_train),
         batch_size=batch_size,
-        num_workers=8,
+        num_workers=num_workers,  # 在这里使用 num_workers 参数
         shuffle=shuffle,
         drop_last=False,
-        pin_memory=(torch.cuda.is_available())
+        pin_memory=torch.cuda.is_available()
     )
     assert len(data_loader) > 0
 
