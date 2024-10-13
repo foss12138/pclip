@@ -9,8 +9,8 @@ import torch.nn.functional as F
 import torch.nn as nn
 import torchvision.transforms as transforms
 
-from datasets import build_dataset
-from datasets.utils import build_data_loader
+from my_datasets import build_dataset
+from my_datasets.utils import build_data_loader
 import clip
 from utils import *
 
