@@ -366,7 +366,7 @@ def build_data_loader(
     is_train=True,
     shuffle=False,
     dataset_wrapper=None,
-    num_workers=0  # 可调的 num_workers 参数，默认为 0，防止并行问题
+    num_workers=8  # 可调的 num_workers 参数，默认为 0，防止并行问题
 ):
 
     # 设置环境变量，避免 tokenizers 的并行化问题

@@ -65,16 +65,32 @@ def run_tip_adapter(cfg, cache_keys, cache_values, val_features, val_labels, tes
     print("**** Tip-Adapter's test accuracy: {:.2f}. ****\n".format(acc))
 
 
+class MLPAdapter(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout_rate=0.5):
+        super(MLPAdapter, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)  # input_dim 应该和 CLIP 输出的特征维度一致
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))  # 第一层 MLP，加 ReLU 激活
+        x = self.dropout(x)      # 加 Dropout 防止过拟合
+        x = self.fc2(x)          # 第二层 MLP
+        return x
+
 def run_tip_adapter_F(cfg, cache_keys, cache_values, val_features, val_labels, test_features, test_labels, clip_weights, clip_model, train_loader_F):
     # 确保 features 和 labels 在 CUDA 设备上
     val_features, val_labels = val_features.cuda(), val_labels.cuda()
     test_features, test_labels = test_features.cuda(), test_labels.cuda()
     cache_keys, cache_values = cache_keys.cuda(), cache_values.cuda()
     clip_weights = clip_weights.cuda()
-    
-    # Enable the cached keys to be learnable
-    adapter = nn.Linear(cache_keys.shape[0], cache_keys.shape[1], bias=False).to(clip_model.dtype).cuda()
-    adapter.weight = nn.Parameter(cache_keys.t())
+
+    # 获取 CLIP 的输出特征维度和缓存键的数量
+    feature_dim = cache_keys.shape[0]  # 512, CLIP 提取的图像特征维度
+    num_keys = cache_keys.shape[1]     # 1596, 缓存键的数量
+
+    # 使用 MLP 作为适配器
+    adapter = MLPAdapter(input_dim=feature_dim, hidden_dim=512, output_dim=num_keys, dropout_rate=0.5).to(clip_model.dtype).cuda()
     
     optimizer = torch.optim.AdamW(adapter.parameters(), lr=cfg['lr'], eps=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, cfg['train_epoch'] * len(train_loader_F))
@@ -83,7 +99,7 @@ def run_tip_adapter_F(cfg, cache_keys, cache_values, val_features, val_labels, t
     best_acc, best_epoch = 0.0, 0
 
     for train_idx in range(cfg['train_epoch']):
-        # Train
+        # 训练
         adapter.train()
         correct_samples, all_samples = 0, 0
         loss_list = []
@@ -93,11 +109,11 @@ def run_tip_adapter_F(cfg, cache_keys, cache_values, val_features, val_labels, t
             images, target = images.cuda(), target.cuda()  # 确保 images 和 target 在 GPU 上
             
             with torch.no_grad():
-                # 使用 processor 处理图像，并将其移动到 CUDA
+                # 使用 CLIP 提取图像特征，并归一化
                 image_features = clip_model.get_image_features(images)
                 image_features /= image_features.norm(dim=-1, keepdim=True)
 
-            # 计算缓存的亲和力
+            # 通过 MLP adapter 计算亲和力
             affinity = adapter(image_features)
             cache_logits = ((-1) * (beta - beta * affinity)).exp() @ cache_values.float()
             clip_logits = 100. * image_features @ clip_weights
@@ -106,7 +122,7 @@ def run_tip_adapter_F(cfg, cache_keys, cache_values, val_features, val_labels, t
             # 计算损失
             loss = F.cross_entropy(tip_logits, target)
 
-            # 计算训练准确性
+            # 计算准确率
             acc = cls_acc(tip_logits, target)
             correct_samples += acc / 100 * len(tip_logits)
             all_samples += len(tip_logits)
@@ -122,28 +138,29 @@ def run_tip_adapter_F(cfg, cache_keys, cache_values, val_features, val_labels, t
         current_lr = scheduler.get_last_lr()[0]
         print('LR: {:.6f}, Acc: {:.4f} ({:}/{:}), Loss: {:.4f}'.format(current_lr, correct_samples / all_samples, correct_samples, all_samples, sum(loss_list)/len(loss_list)))
 
-        # Eval: 在测试集上评估当前适配器的性能
+        # 测试阶段
         adapter.eval()
 
-        affinity = adapter(test_features)
-        cache_logits = ((-1) * (beta - beta * affinity)).exp() @ cache_values.float()
-        clip_logits = 100. * test_features @ clip_weights
-        tip_logits = clip_logits + cache_logits * alpha
-        acc = cls_acc(tip_logits, test_labels)
+        with torch.no_grad():
+            affinity = adapter(test_features)
+            cache_logits = ((-1) * (beta - beta * affinity)).exp() @ cache_values.float()
+            clip_logits = 100. * test_features @ clip_weights
+            tip_logits = clip_logits + cache_logits * alpha
+            acc = cls_acc(tip_logits, test_labels)
 
         print("**** Tip-Adapter-F's test accuracy: {:.2f}. ****\n".format(acc))
         if acc > best_acc:
             best_acc = acc
             best_epoch = train_idx
-            torch.save(adapter.weight, cfg['cache_dir'] + "/best_F_" + str(cfg['shots']) + "shots.pt")
+            torch.save(adapter.state_dict(), cfg['cache_dir'] + "/best_F_" + str(cfg['shots']) + "shots.pt")
     
     # 加载最佳权重进行最终评估
-    adapter.weight = torch.load(cfg['cache_dir'] + "/best_F_" + str(cfg['shots']) + "shots.pt")
+    adapter.load_state_dict(torch.load(cfg['cache_dir'] + "/best_F_" + str(cfg['shots']) + "shots.pt"))
     print(f"**** After fine-tuning, Tip-Adapter-F's best test accuracy: {best_acc:.2f}, at epoch: {best_epoch}. ****\n")
 
     print("\n-------- Searching hyperparameters on the val set. --------")
 
-    # Search Hyperparameters
+    # 搜索最佳超参数
     best_beta, best_alpha = search_hp(cfg, cache_keys, cache_values, val_features, val_labels, clip_weights, adapter=adapter)
 
     print("\n-------- Evaluating on the test set. --------")
@@ -154,6 +171,7 @@ def run_tip_adapter_F(cfg, cache_keys, cache_values, val_features, val_labels, t
     tip_logits = clip_logits + cache_logits * best_alpha
     acc = cls_acc(tip_logits, test_labels)
     print("**** Tip-Adapter-F's test accuracy: {:.2f}. ****\n".format(max(best_acc, acc)))
+
 
 
 
